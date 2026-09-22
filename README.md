@@ -30,19 +30,56 @@ third_party/robustnav   RobustNav 评估集来源（不进 git）
 
 ## 环境
 
-需要 Linux、NVIDIA 驱动，以及和驱动主版本一致的 Vulkan（AI2-THOR CloudRendering 用它画图）。Python 3.9。
+需要 Linux、已安装的 Miniconda 或 Anaconda、NVIDIA 驱动，以及和驱动主版本一致的 Vulkan（AI2-THOR CloudRendering 用它画图）。环境名是 `spikingnav`，Python 3.9。本机验证过的组合是 Python 3.9.23 与 `torch 2.8.0+cu128`。
+
+还没有 conda 时，先装 Miniconda，装完重新打开终端：
+
+```bash
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh
+```
+
+在仓库根目录创建环境并装上仿真栈。`moviepy` 必须是 `1.0.3`，2.x 会让 AllenAct 的 `from moviepy import editor` 失败。
+
+```bash
+cd /path/to/SNN-Nav
+conda create -n spikingnav python=3.9 -y
+conda activate spikingnav
+
+# 与本机驱动匹配的 CUDA 12.8 轮子。驱动更旧时，把 cu128 换成对应的 CUDA 版本。
+pip install torch==2.8.0 torchvision --index-url https://download.pytorch.org/whl/cu128
+
+pip install -r requirements.txt
+pip install -e .
+pip install 'ai2thor>=2.7.4' 'allenact' 'allenact_plugins[ithor]' 'moviepy==1.0.3'
+pip install tensorboard
+```
+
+`requirements.txt` 里的 `torch>=1.12` 有时会把上面的 CUDA 轮子换成 PyPI 上的另一构建。装完后确认版本仍带 `+cu128`，并且能看到 GPU：
+
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.device_count())"
+```
+
+若打印出来的不是 `2.8.0+cu128`，把 `pip install torch==2.8.0 ... cu128` 那一行再执行一次。
+
+也可以用脚本一次做完。它按 `environment.yml` 创建 `spikingnav`（已存在则跳过创建），然后执行 `pip install -e .` 以及 AllenAct / AI2-THOR。脚本不会指定 CUDA 轮子，GPU 训练前仍要用上面的命令核对 `torch.__version__`。
 
 ```bash
 bash scripts/setup_env.sh
 conda activate spikingnav
 ```
 
-`setup_env.sh` 会按 `environment.yml` 创建 conda 环境 `spikingnav`，并安装本包、`allenact`、`allenact_plugins[ithor]`、`ai2thor`。`moviepy` 固定为 `1.0.3`（2.x 会让 AllenAct 的 `from moviepy import editor` 失败）。
-
-只跑模型和单测、不启动模拟器时：
+以后每次开新终端：
 
 ```bash
-pip install -e .
+conda activate spikingnav
+cd /path/to/SNN-Nav
+```
+
+只检查模型和单测、不启动模拟器时：
+
+```bash
 pytest -q
 python scripts/smoke_test.py
 ```
