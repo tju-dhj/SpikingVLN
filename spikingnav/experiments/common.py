@@ -316,7 +316,9 @@ def build_experiment_class(
                 return {}
             if self.use_x11:
                 return {"x_display": f"0.{local_index}"}
-            # CloudRendering: gpu_device is an index into CUDA_VISIBLE_DEVICES.
+            # Local index into CUDA_VISIBLE_DEVICES. CloudRendering then
+            # rewrites it; set SPIKINGNAV_THOR_GPU_IDS when that rewrite does
+            # not land on the nvidia-smi GPU this process is using.
             return {"gpu_device": local_index}
 
         def _get_sampler_args_for_scene_split(
