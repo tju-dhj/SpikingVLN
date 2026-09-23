@@ -226,6 +226,99 @@ python main.py \
   -vc "Speckle Noise" -vs 5
 ```
 
+## Habitat HM3D ObjectNav
+
+论文实验本身在 RoboTHOR 上。HM3D / Gibson / MP3D 的 ObjectNav 回合在 `datasets/objectnav`，网格在 `datasets/scene_datasets`。这一路用 Habitat 3（habitat-lab 与 habitat-sim **0.3.1**）跑 SpikingNav 的 SSE + SPN，不跑 PONI 的势函数。HM3D 的 6 类目标是 chair、bed、plant、toilet、tv_monitor、sofa。动作是 Habitat ObjectNav 的 stop / move_forward / turn_left / turn_right / look_up / look_down。成功判定沿用 Habitat：停在可见目标的 viewpoint 0.1 m 内。
+
+本机的 `habitat-sim 0.3.1` 装在 `dpedvln` 环境里。`scripts/train_habitat_hm3d.sh` 用那个解释器，单卡默认 `CUDA_VISIBLE_DEVICES=0`。`--gpu` 是这组可见设备里的序号：只露出一张物理卡时写 `--gpu 0`。`--algo` 可选 `ppo`、`il`、`il-human`，默认 `ppo`。
+
+### PPO
+
+奖励与 RobustNav / AllenAct 相同，测地项按本步实际位移裁剪：
+
+```
+r_t = 10 * I_success + clip(d_{t-1} - d_t, ±本步位移) - 0.01
+```
+
+PPO 为 `clip=0.1`（价值损失用同一个 ε 裁剪），价值系数 0.5，熵系数 0.01，学习率 `3e-4` 按总步数线性衰减到 0，`γ=0.99`，GAE `λ=0.95`，rollout 128，每个 rollout 更新 4 轮，梯度裁剪 0.5。总步数默认 3 亿。
+
+单卡：
+
+```bash
+# 先用一个验证场景走通
+bash scripts/train_habitat_hm3d.sh \
+  --algo ppo --split val --scenes 4ok3usBNeis --num-envs 1 \
+  --rollout-steps 8 --total-steps 8
+
+# HM3D v1 训练集，默认物理 GPU 0
+bash scripts/train_habitat_hm3d.sh --algo ppo --split train --num-envs 8
+```
+
+DD-PPO 用 `scripts/train_habitat_hm3d_dist.sh`。`CUDA_VISIBLE_DEVICES` 里每张卡一个进程，各自采样、各自保留膜电位，反传后按样本数平均梯度。较快的卡采完一轮后，较慢的卡只要已经走完至少一半 rollout，就可以提前更新。`--num-envs` 是每张卡的环境数，`--total-steps` 是所有卡合计的环境步。最多列 4 张卡。两张卡时把 `--preemption-threshold` 设为 `0.5`；默认 `0.6` 要等两张卡都采完。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash scripts/train_habitat_hm3d_dist.sh \
+  --algo ppo --split train --num-envs 8 --preemption-threshold 0.5
+```
+
+日志里应出现 `DD-PPO world 2`。检查点与 TensorBoard 在 `storage/habitat-objectnav-hm3d-spiking/`（事件在其中的 `tb/`），多卡时只由第一张卡写入。检查点默认每 50 次更新存一次。Gibson 和 MP3D 的回合目录已经在 `datasets/objectnav` 下，场景网格齐了之后可以用同一套环境入口换数据路径。
+
+### 模仿学习
+
+模仿学习用同一套 SSE + SPN。损失是专家动作上的交叉熵。`--algo il` 的专家是测地最短路，直接用 HM3D 场景。`--algo il-human` 的专家是人工遥控动作，回合目录是 `datasets/objectnav_hm3d_hd/objectnav_hm3d_hd`。还没有这批示范时：
+
+```bash
+HF_ENDPOINT=https://hf-mirror.com hf download axel81/pirlnav \
+  --repo-type dataset --include "objectnav_hm3d_hd/*" \
+  --local-dir datasets/objectnav_hm3d_hd --max-workers 1
+```
+
+`--beta-start` 到 `--beta-end` 是执行专家动作的概率。下面两条都固定为 1，智能体始终跟着专家走。`il` 省略这两项时，会在 `--total-steps` 内从 1 线性降到 0。`il-human` 在脚本里固定为 1。
+
+```bash
+# 测地最短路
+CUDA_VISIBLE_DEVICES=1 bash scripts/train_habitat_hm3d.sh \
+  --algo il --gpu 0 --num-envs 4 \
+  --beta-start 1 --beta-end 1 \
+  --output-dir storage/habitat-objectnav-hm3d-il-geodesic
+
+# 人工示范
+CUDA_VISIBLE_DEVICES=2 bash scripts/train_habitat_hm3d.sh \
+  --algo il-human --gpu 0 --num-envs 4 \
+  --output-dir storage/habitat-objectnav-hm3d-il-human
+```
+
+省略 `--output-dir` 时，测地线写到 `storage/habitat-objectnav-hm3d-il-geodesic/`，人工示范写到 `storage/habitat-objectnav-hm3d-il-human/`。TensorBoard 在各自的 `tb/`，标量有 `train/bc_loss`、`train/agreement`、`train/beta`、`train/success`、`train/spl`。检查点默认每 50 次更新存一次。
+
+### 多卡模仿学习
+
+PPO 的多卡方式见上一节。模仿学习也可以用同一个脚本，没有 rollout 抢占：
+
+```bash
+CUDA_VISIBLE_DEVICES=1,2 bash scripts/train_habitat_hm3d_dist.sh \
+  --algo il --num-envs 4 --beta-start 1 --beta-end 1 \
+  --output-dir storage/habitat-objectnav-hm3d-il-geodesic-dist
+```
+
+人工示范把 `--algo` 换成 `il-human`，并使用新的 `--output-dir`。默认主端口是 `29531`，占用时设置 `MASTER_PORT`。TensorBoard 和检查点由第一张卡写入 `--output-dir`。
+
+### 查看曲线
+
+在服务器终端启动，并监听所有网卡。6006 常被别的任务占用，这里用 6011：
+
+```bash
+tensorboard --logdir storage/habitat-objectnav-hm3d-spiking/tb --host 0.0.0.0 --port 6011
+```
+
+保持这个窗口。在自己电脑的浏览器打开 `http://10.80.42.129:6011`。要同时看 RoboTHOR 与几条 HM3D 曲线时，把 `--logdir` 换成 `storage`。只看两条模仿学习时：
+
+```bash
+tensorboard --logdir_spec=geodesic:storage/habitat-objectnav-hm3d-il-geodesic/tb,human:storage/habitat-objectnav-hm3d-il-human/tb \
+  --host 0.0.0.0 --port 6020
+```
+
+浏览器打开 `http://10.80.42.129:6020`。
+
 ## 论文对照
 
 | 方法 | Params | FLOPs | PointNav SR/SPL | ObjectNav SR/SPL | 腐蚀均值 SR/SPL |
