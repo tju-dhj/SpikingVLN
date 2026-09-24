@@ -10,6 +10,7 @@ import torch
 from torch.nn.utils import clip_grad_norm_
 
 from spikingnav.config import DEFAULT_CONFIG, SpikingNavConfig
+from spikingnav.habitat_objectnav.ckpt_keeper import checkpoint_payload, restore_checkpoint
 from spikingnav.habitat_objectnav.distributed import (
     RolloutPreemption,
     average_gradients,
@@ -96,6 +97,7 @@ class HabitatSpikingTrainer:
         episode_root: str = DEFAULT_EPISODE_ROOT,
         scenes_dir: str = DEFAULT_SCENES_DIR,
         preemption_threshold: float = 0.6,
+        resume_path: str = "",
         cfg: Optional[SpikingNavConfig] = None,
     ) -> None:
         self.cfg = cfg or DEFAULT_CONFIG
@@ -147,8 +149,14 @@ class HabitatSpikingTrainer:
             cfg=self.cfg,
             pretrained_ann=pretrained_ann,
         ).to(self.device)
-        broadcast_parameters(self.model)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.cfg.learning_rate)
+        self.resume_steps = 0
+        self.resume_optimizer = False
+        if resume_path:
+            self.resume_steps, self.resume_optimizer = restore_checkpoint(
+                resume_path, self.model, self.optimizer, self.device
+            )
+        broadcast_parameters(self.model)
         self.memory = self.model.initial_memory(self.num_envs, self.device)
         self.masks = torch.ones(self.num_envs, 1, device=self.device)
         self.preemption = RolloutPreemption(preemption_threshold)
@@ -347,7 +355,10 @@ class HabitatSpikingTrainer:
                     flush=True,
                 )
         observations = self.envs.reset()
-        steps = 0
+        steps = self.resume_steps
+        if self.is_main and self.resume_steps:
+            optimizer_note = "optimizer restored" if self.resume_optimizer else "optimizer starts fresh"
+            print(f"resume from step {steps}, {optimizer_note}", flush=True)
         update_idx = 0
         success_acc = 0.0
         spl_acc = 0.0
@@ -401,7 +412,10 @@ class HabitatSpikingTrainer:
                     episode_acc = 0
                 if update_idx % self.save_interval_updates == 0 and self.is_main:
                     path = os.path.join(self.output_dir, f"ckpt_steps_{steps}.pt")
-                    torch.save({"model": self.model.state_dict(), "steps": steps}, path)
+                    torch.save(
+                        checkpoint_payload(self.model, self.optimizer, steps, algo="ppo"),
+                        path,
+                    )
                     print(f"saved {path}", flush=True)
         finally:
             self._finish(writer)

@@ -63,7 +63,15 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 
 若打印出来的不是 `2.8.0+cu128`，把 `pip install torch==2.8.0 ... cu128` 那一行再执行一次。
 
-也可以用脚本一次做完。它按 `environment.yml` 创建 `spikingnav`（已存在则跳过创建），然后执行 `pip install -e .` 以及 AllenAct / AI2-THOR。脚本不会指定 CUDA 轮子，GPU 训练前仍要用上面的命令核对 `torch.__version__`。
+`environment.yml` 是当前可用的 `spikingnav` 环境重新导出的版本钉死清单，包含 Python 3.9.23、`torch==2.8.0`、`torchvision==0.23.0` 以及 CUDA 12.8 的 `nvidia-*-cu12` 轮子。文件里没有本机安装路径。换机器时：
+
+```bash
+conda env create -f environment.yml
+conda activate spikingnav
+pip install -e .
+```
+
+也可以用脚本一次做完。它按 `environment.yml` 创建 `spikingnav`（已存在则跳过创建），然后执行 `pip install -e .` 以及 AllenAct / AI2-THOR。GPU 训练前仍要核对 `torch.__version__` 带有 `+cu128`。
 
 ```bash
 bash scripts/setup_env.sh
@@ -230,7 +238,25 @@ python main.py \
 
 论文实验本身在 RoboTHOR 上。HM3D / Gibson / MP3D 的 ObjectNav 回合在 `datasets/objectnav`，网格在 `datasets/scene_datasets`。这一路用 Habitat 3（habitat-lab 与 habitat-sim **0.3.1**）跑 SpikingNav 的 SSE + SPN，不跑 PONI 的势函数。HM3D 的 6 类目标是 chair、bed、plant、toilet、tv_monitor、sofa。动作是 Habitat ObjectNav 的 stop / move_forward / turn_left / turn_right / look_up / look_down。成功判定沿用 Habitat：停在可见目标的 viewpoint 0.1 m 内。
 
-本机的 `habitat-sim 0.3.1` 装在 `dpedvln` 环境里。`scripts/train_habitat_hm3d.sh` 用那个解释器，单卡默认 `CUDA_VISIBLE_DEVICES=0`。`--gpu` 是这组可见设备里的序号：只露出一张物理卡时写 `--gpu 0`。`--algo` 可选 `ppo`、`il`、`il-human`，默认 `ppo`。
+Habitat 和上面的 RoboTHOR 不是同一个环境。RoboTHOR 用 `spikingnav`。Habitat 需要单独的 Python，里面有 **habitat-sim 0.3.1** 和能 `import habitat` 的 **habitat-lab 0.3.x**。无头服务器不需要显示器。进程最多同时打开 4 张 CUDA 设备，所以 `CUDA_VISIBLE_DEVICES` 最多列 4 个编号；不设置时脚本默认只用 `0`。`--gpu` 是这组可见设备里的序号，只露出一张物理卡时写 `--gpu 0`。`--algo` 可选 `ppo`、`il`、`il-human`，默认 `ppo`。
+
+换一台机器时，在仓库根目录先指定解释器和 habitat-lab 源码目录。当前这台服务器上这两个路径已经能自动找到，可以不写：
+
+```bash
+export HABITAT_PYTHON=/path/to/envs/habitat/bin/python
+export HABITAT_LAB=/path/to/habitat-lab
+"$HABITAT_PYTHON" -c "import habitat, habitat_sim; print(habitat_sim.__version__)"
+```
+
+数据放在仓库里的这些位置（脚本按仓库根目录找，不写绝对路径）：
+
+```
+datasets/objectnav/hm3d/v1/{train,val,val_mini}/   # 回合 json.gz
+datasets/scene_datasets/hm3d/{train,val}/          # *.basis.glb
+datasets/objectnav_hm3d_hd/objectnav_hm3d_hd/      # 仅 il-human
+```
+
+长时间训练放进 tmux，断线或合上笔记本不会停。看到日志后按 `Ctrl-b` 再按 `d` 离开；下次 `tmux attach -t <会话名>`。同一张卡、同一个输出目录上不要再开第二个训练进程。
 
 ### PPO
 
@@ -261,7 +287,14 @@ CUDA_VISIBLE_DEVICES=0,1 bash scripts/train_habitat_hm3d_dist.sh \
   --algo ppo --split train --num-envs 8 --preemption-threshold 0.5
 ```
 
-日志里应出现 `DD-PPO world 2`。检查点与 TensorBoard 在 `storage/habitat-objectnav-hm3d-spiking/`（事件在其中的 `tb/`），多卡时只由第一张卡写入。检查点默认每 50 次更新存一次。Gibson 和 MP3D 的回合目录已经在 `datasets/objectnav` 下，场景网格齐了之后可以用同一套环境入口换数据路径。
+日志里应出现 `DD-PPO world 2`。检查点与 TensorBoard 在 `storage/habitat-objectnav-hm3d-spiking/`（事件在其中的 `tb/`），多卡时只由第一张卡写入。检查点默认每 50 次更新存一次。`--resume` 从已有 `ckpt_steps_*.pt` 继续：恢复网络权重和文件里的步数，学习率按这个步数在总步数上接着衰减。文件里若有优化器状态也会一起恢复；只有权重和步数的旧检查点会让优化器从头开始，之后新写出的检查点会带上优化器。日志出现 `resume from step <步数>` 即表示接上。`train/success`、`train/spl` 来自训练集 rollout 中刚好结束的回合。验证集评估用下面的检查点监控。Gibson 和 MP3D 的回合目录已经在 `datasets/objectnav` 下，场景网格齐了之后可以用同一套环境入口换数据路径。
+
+```bash
+tmux new -s train-ppo
+CUDA_VISIBLE_DEVICES=0 bash scripts/train_habitat_hm3d.sh \
+  --algo ppo --split train --num-envs 8 \
+  --resume storage/habitat-objectnav-hm3d-spiking/ckpt_steps_<步数>.pt
+```
 
 ### 模仿学习
 
@@ -288,7 +321,17 @@ CUDA_VISIBLE_DEVICES=2 bash scripts/train_habitat_hm3d.sh \
   --output-dir storage/habitat-objectnav-hm3d-il-human
 ```
 
-省略 `--output-dir` 时，测地线写到 `storage/habitat-objectnav-hm3d-il-geodesic/`，人工示范写到 `storage/habitat-objectnav-hm3d-il-human/`。TensorBoard 在各自的 `tb/`，标量有 `train/bc_loss`、`train/agreement`、`train/beta`、`train/success`、`train/spl`。检查点默认每 50 次更新存一次。
+省略 `--output-dir` 时，测地线写到 `storage/habitat-objectnav-hm3d-il-geodesic/`，人工示范写到 `storage/habitat-objectnav-hm3d-il-human/`。TensorBoard 在各自的 `tb/`，标量有 `train/bc_loss`、`train/agreement`、`train/beta`、`train/success`、`train/spl`。检查点默认每 50 次更新存一次。这里的 `train/success`、`train/spl` 同样来自训练回合；`--algo il` 的动作还按 `beta` 混入专家动作。`--resume` 从该步继续，`beta` 按恢复后的步数计算。验证集评估用下面的检查点监控。
+
+```bash
+tmux new -s train-il
+CUDA_VISIBLE_DEVICES=1 bash scripts/train_habitat_hm3d.sh \
+  --algo il --gpu 0 --num-envs 4 --beta-start 1 --beta-end 1 \
+  --output-dir storage/habitat-objectnav-hm3d-il-geodesic \
+  --resume storage/habitat-objectnav-hm3d-il-geodesic/ckpt_steps_<步数>.pt
+```
+
+人工示范把卡换成 `CUDA_VISIBLE_DEVICES=2`，`--algo il-human`，目录和 `--resume` 都换成 `storage/habitat-objectnav-hm3d-il-human/ckpt_steps_<步数>.pt`。会话名用 `train-human`。新机器上先按上一节导出 `HABITAT_PYTHON` 和 `HABITAT_LAB`。人工示范数据用 Hugging Face 下载；镜像不可用时去掉 `HF_ENDPOINT` 那一项。
 
 ### 多卡模仿学习
 
@@ -302,22 +345,42 @@ CUDA_VISIBLE_DEVICES=1,2 bash scripts/train_habitat_hm3d_dist.sh \
 
 人工示范把 `--algo` 换成 `il-human`，并使用新的 `--output-dir`。默认主端口是 `29531`，占用时设置 `MASTER_PORT`。TensorBoard 和检查点由第一张卡写入 `--output-dir`。
 
+### 边训练边评估
+
+`scripts/watch_habitat_eval.sh` 盯着一个检查点目录。训练每写出一个写完的 `ckpt_steps_*.pt`，它就在验证集上用贪心动作跑一轮，把 SR 和 SPL 追加到该目录的 `eval_results.tsv`。评完后只保留 SR 最高的两个权重，其余已评测的 `ckpt_steps_*.pt` 会删掉。SR 相同时留下 SPL 更高的；仍相同则留下训练步数更大的。还没评完的文件不会删，`tb/` 和 `eval_results.tsv` 也不会删。
+
+换一张训练没用的卡。`--gpu` 仍是可见设备里的序号：
+
+```bash
+# PPO
+CUDA_VISIBLE_DEVICES=3 bash scripts/watch_habitat_eval.sh \
+  --ckpt-dir storage/habitat-objectnav-hm3d-spiking \
+  --split val --episodes 100 --num-envs 2 --gpu 0
+
+# 测地线模仿学习
+CUDA_VISIBLE_DEVICES=3 bash scripts/watch_habitat_eval.sh \
+  --ckpt-dir storage/habitat-objectnav-hm3d-il-geodesic \
+  --split val --episodes 100 --num-envs 2 --gpu 0
+```
+
+人工示范把目录换成 `storage/habitat-objectnav-hm3d-il-human`。`--keep` 默认是 2。`--episodes` 是每个检查点评多少个验证回合，默认 100。`--once` 只评当前目录里还没记录的检查点，然后退出。
+
 ### 查看曲线
 
-在服务器终端启动，并监听所有网卡。6006 常被别的任务占用，这里用 6011：
+在服务器上启动，并监听所有网卡。端口按机器上的空闲端口改：
 
 ```bash
 tensorboard --logdir storage/habitat-objectnav-hm3d-spiking/tb --host 0.0.0.0 --port 6011
 ```
 
-保持这个窗口。在自己电脑的浏览器打开 `http://10.80.42.129:6011`。要同时看 RoboTHOR 与几条 HM3D 曲线时，把 `--logdir` 换成 `storage`。只看两条模仿学习时：
+保持这个窗口。在自己电脑的浏览器打开 `http://<服务器IP>:6011`。服务器 IP 用 `hostname -I` 查看。要同时看 RoboTHOR 与几条 HM3D 曲线时，把 `--logdir` 换成 `storage`。只看两条模仿学习时：
 
 ```bash
 tensorboard --logdir_spec=geodesic:storage/habitat-objectnav-hm3d-il-geodesic/tb,human:storage/habitat-objectnav-hm3d-il-human/tb \
   --host 0.0.0.0 --port 6020
 ```
 
-浏览器打开 `http://10.80.42.129:6020`。
+浏览器打开 `http://<服务器IP>:6020`。若中间有防火墙，在本机做 SSH 转发：`ssh -L 6011:127.0.0.1:6011 <用户>@<服务器IP>`，然后打开 `http://127.0.0.1:6011`。这时 TensorBoard 也可以只绑 `127.0.0.1`。
 
 ## 论文对照
 

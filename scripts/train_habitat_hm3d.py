@@ -36,6 +36,11 @@ def main() -> None:
         help="DD-PPO: fraction of workers that must finish a rollout before the rest may stop early. 0 disables it.",
     )
     parser.add_argument("--output-dir", default="")
+    parser.add_argument(
+        "--resume",
+        default="",
+        help="Checkpoint to continue from. Restores the network, the step count, and the optimizer when the file has one.",
+    )
     parser.add_argument("--episode-root", default="")
     parser.add_argument("--no-pretrained", action="store_true")
     parser.add_argument("--beta-start", type=float, default=1.0)
@@ -87,7 +92,8 @@ def main() -> None:
         rollout_steps=args.rollout_steps,
         total_steps=args.total_steps,
         max_episode_steps=args.max_episode_steps,
-        pretrained_ann=not args.no_pretrained,
+        pretrained_ann=not args.no_pretrained and not args.resume,
+        resume_path=args.resume,
         output_dir=output_dir,
         log_interval=args.log_interval,
         save_interval_updates=args.save_interval_updates,

@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 
+from spikingnav.habitat_objectnav.ckpt_keeper import checkpoint_payload
 from spikingnav.habitat_objectnav.distributed import average_gradients, reduce_mean, reduce_sum
 from spikingnav.habitat_objectnav.expert import dagger_beta
 from spikingnav.habitat_objectnav.trainer import (
@@ -56,7 +57,7 @@ class HabitatILTrainer(HabitatSpikingTrainer):
         self.beta_start = float(beta_start)
         self.beta_end = float(beta_end)
         self.beta_decay_steps = int(beta_decay_steps)
-        self._env_steps = 0
+        self._env_steps = self.resume_steps
         self._expert_call = "demo_action" if expert == "human" else "expert_action"
 
     def _beta(self) -> float:
@@ -174,6 +175,12 @@ class HabitatILTrainer(HabitatSpikingTrainer):
                 flush=True,
             )
         observations = self.envs.reset()
+        if self.is_main and self.resume_steps:
+            optimizer_note = "optimizer restored" if self.resume_optimizer else "optimizer starts fresh"
+            print(
+                f"resume from step {self._env_steps}, {optimizer_note}",
+                flush=True,
+            )
         update_idx = 0
         success_acc = 0.0
         spl_acc = 0.0
@@ -220,7 +227,9 @@ class HabitatILTrainer(HabitatSpikingTrainer):
                 if update_idx % self.save_interval_updates == 0 and self.is_main:
                     path = os.path.join(self.output_dir, f"ckpt_steps_{self._env_steps}.pt")
                     torch.save(
-                        {"model": self.model.state_dict(), "steps": self._env_steps, "algo": "il"},
+                        checkpoint_payload(
+                            self.model, self.optimizer, self._env_steps, algo="il"
+                        ),
                         path,
                     )
                     print(f"saved {path}", flush=True)

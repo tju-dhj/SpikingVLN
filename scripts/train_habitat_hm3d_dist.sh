@@ -30,13 +30,8 @@ export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
 export MAGNUM_LOG="${MAGNUM_LOG:-quiet}"
 export GLOG_minloglevel="${GLOG_minloglevel:-2}"
 export SPIKINGNAV_VIS_CHUNK="${SPIKINGNAV_VIS_CHUNK:-2}"
-export PYTHONPATH="${ROOT}:/amax/daihaojie/DPed-VLN/habitat-lab${PYTHONPATH:+:$PYTHONPATH}"
-
-PYTHON="${HABITAT_PYTHON:-/home/w61/miniconda3/envs/dpedvln/bin/python}"
-if [[ ! -x "$PYTHON" ]]; then
-  echo "Habitat 0.3.1 python not found at $PYTHON. Set HABITAT_PYTHON."
-  exit 1
-fi
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/habitat_env.sh"
 
 exec "$PYTHON" -m torch.distributed.run \
   --nproc_per_node="${NPROC}" \
