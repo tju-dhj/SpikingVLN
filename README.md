@@ -258,6 +258,48 @@ datasets/objectnav_hm3d_hd/objectnav_hm3d_hd/      # 仅 il-human
 
 长时间训练放进 tmux，断线或合上笔记本不会停。看到日志后按 `Ctrl-b` 再按 `d` 离开；下次 `tmux attach -t <会话名>`。同一张卡、同一个输出目录上不要再开第二个训练进程。
 
+### 换到另一台服务器接续
+
+2026-09-25 时，本机 PPO 已停在第 643072 步，但最后一次落盘是 `ckpt_steps_614400.pt`。两条模仿学习仍在写检查点。换机器前先停掉本机还在跑的进程，再拷贝当时最新的 `ckpt_steps_*.pt`。下面是这一时刻可接续的文件，三个文件都只有 `model` 和 `steps`，没有优化器状态：
+
+| 任务 | 拷贝这个文件 | 步数 |
+| --- | --- | --- |
+| PPO | `storage/habitat-objectnav-hm3d-spiking/ckpt_steps_614400.pt` | 614400 |
+| 测地线 IL | `storage/habitat-objectnav-hm3d-il-geodesic/ckpt_steps_563200.pt` | 563200 |
+| 人工示范 IL | `storage/habitat-objectnav-hm3d-il-human/ckpt_steps_691200.pt` | 691200 |
+
+新机器上克隆仓库后设置 `HABITAT_PYTHON` 和 `HABITAT_LAB`。场景网格约 91GB，回合标注约 631MB，人工示范约 84MB，放回上表里的相对路径。权重放回各自的 `storage/` 目录。卡号按新机器的空闲 GPU 改。
+
+```bash
+git clone git@github.com:tju-dhj/SpikingVLN.git
+cd SpikingVLN
+export HABITAT_PYTHON=/path/to/envs/habitat/bin/python
+export HABITAT_LAB=/path/to/habitat-lab
+
+tmux new -s train-ppo
+CUDA_VISIBLE_DEVICES=0 bash scripts/train_habitat_hm3d.sh \
+  --algo ppo --split train --num-envs 8 \
+  --resume storage/habitat-objectnav-hm3d-spiking/ckpt_steps_614400.pt
+```
+
+```bash
+tmux new -s train-il
+CUDA_VISIBLE_DEVICES=1 bash scripts/train_habitat_hm3d.sh \
+  --algo il --gpu 0 --num-envs 4 --beta-start 1 --beta-end 1 \
+  --output-dir storage/habitat-objectnav-hm3d-il-geodesic \
+  --resume storage/habitat-objectnav-hm3d-il-geodesic/ckpt_steps_563200.pt
+```
+
+```bash
+tmux new -s train-human
+CUDA_VISIBLE_DEVICES=2 bash scripts/train_habitat_hm3d.sh \
+  --algo il-human --gpu 0 --num-envs 4 \
+  --output-dir storage/habitat-objectnav-hm3d-il-human \
+  --resume storage/habitat-objectnav-hm3d-il-human/ckpt_steps_691200.pt
+```
+
+日志里出现 `resume from step <步数>, optimizer starts fresh` 即表示接上。学习率（PPO）和 `beta`（IL）按文件里的步数继续；Adam 的动量从这一步重新积累。这次接续之后新写出的检查点会带上优化器，再下次 `--resume` 会一起恢复。按 `Ctrl-b` 再按 `d` 离开会话。
+
 ### PPO
 
 奖励与 RobustNav / AllenAct 相同，测地项按本步实际位移裁剪：
@@ -289,11 +331,13 @@ CUDA_VISIBLE_DEVICES=0,1 bash scripts/train_habitat_hm3d_dist.sh \
 
 日志里应出现 `DD-PPO world 2`。检查点与 TensorBoard 在 `storage/habitat-objectnav-hm3d-spiking/`（事件在其中的 `tb/`），多卡时只由第一张卡写入。检查点默认每 50 次更新存一次。`--resume` 从已有 `ckpt_steps_*.pt` 继续：恢复网络权重和文件里的步数，学习率按这个步数在总步数上接着衰减。文件里若有优化器状态也会一起恢复；只有权重和步数的旧检查点会让优化器从头开始，之后新写出的检查点会带上优化器。日志出现 `resume from step <步数>` 即表示接上。`train/success`、`train/spl` 来自训练集 rollout 中刚好结束的回合。验证集评估用下面的检查点监控。Gibson 和 MP3D 的回合目录已经在 `datasets/objectnav` 下，场景网格齐了之后可以用同一套环境入口换数据路径。
 
+当前可接续的 PPO 权重和换机器步骤见上面的「换到另一台服务器接续」。同一台机器上从任意 `ckpt_steps_*.pt` 继续时，把下面的文件名换成那个检查点：
+
 ```bash
 tmux new -s train-ppo
 CUDA_VISIBLE_DEVICES=0 bash scripts/train_habitat_hm3d.sh \
   --algo ppo --split train --num-envs 8 \
-  --resume storage/habitat-objectnav-hm3d-spiking/ckpt_steps_<步数>.pt
+  --resume storage/habitat-objectnav-hm3d-spiking/ckpt_steps_614400.pt
 ```
 
 ### 模仿学习
@@ -323,15 +367,17 @@ CUDA_VISIBLE_DEVICES=2 bash scripts/train_habitat_hm3d.sh \
 
 省略 `--output-dir` 时，测地线写到 `storage/habitat-objectnav-hm3d-il-geodesic/`，人工示范写到 `storage/habitat-objectnav-hm3d-il-human/`。TensorBoard 在各自的 `tb/`，标量有 `train/bc_loss`、`train/agreement`、`train/beta`、`train/success`、`train/spl`。检查点默认每 50 次更新存一次。这里的 `train/success`、`train/spl` 同样来自训练回合；`--algo il` 的动作还按 `beta` 混入专家动作。`--resume` 从该步继续，`beta` 按恢复后的步数计算。验证集评估用下面的检查点监控。
 
+换机器时的测地线与人工示范命令也在「换到另一台服务器接续」。同一台机器上接续测地线 IL：
+
 ```bash
 tmux new -s train-il
 CUDA_VISIBLE_DEVICES=1 bash scripts/train_habitat_hm3d.sh \
   --algo il --gpu 0 --num-envs 4 --beta-start 1 --beta-end 1 \
   --output-dir storage/habitat-objectnav-hm3d-il-geodesic \
-  --resume storage/habitat-objectnav-hm3d-il-geodesic/ckpt_steps_<步数>.pt
+  --resume storage/habitat-objectnav-hm3d-il-geodesic/ckpt_steps_563200.pt
 ```
 
-人工示范把卡换成 `CUDA_VISIBLE_DEVICES=2`，`--algo il-human`，目录和 `--resume` 都换成 `storage/habitat-objectnav-hm3d-il-human/ckpt_steps_<步数>.pt`。会话名用 `train-human`。新机器上先按上一节导出 `HABITAT_PYTHON` 和 `HABITAT_LAB`。人工示范数据用 Hugging Face 下载；镜像不可用时去掉 `HF_ENDPOINT` 那一项。
+人工示范把卡换成 `CUDA_VISIBLE_DEVICES=2`，`--algo il-human`，目录和 `--resume` 都换成 `storage/habitat-objectnav-hm3d-il-human/ckpt_steps_691200.pt`。会话名用 `train-human`。人工示范数据用 Hugging Face 下载；镜像不可用时去掉 `HF_ENDPOINT` 那一项。
 
 ### 多卡模仿学习
 
